@@ -1,0 +1,1338 @@
+[
+    {
+        "id": "a96f03b406983529",
+        "type": "tab",
+        "label": "LVFD Monitor",
+        "disabled": false,
+        "info": ""
+    },
+    {
+        "id": "f43cc563a2b29f43",
+        "type": "serial in",
+        "z": "a96f03b406983529",
+        "name": "ESP32 In",
+        "serial": "ser1",
+        "x": 110,
+        "y": 260,
+        "wires": [
+            [
+                "34b29ce607b2b2f3"
+            ]
+        ]
+    },
+    {
+        "id": "34b29ce607b2b2f3",
+        "type": "function",
+        "z": "a96f03b406983529",
+        "name": "Parse Line",
+        "func": "// Route one serial line from the ESP32 to the right output.\n// Outputs: 0 LIVE | 1 WV | 2 WI | 3 FAULT | 4 COV | 5 event log\n//          6 LINE (applied conductor setup) | 7 SEC (per-section details)\nvar s = String(msg.payload).trim();\nif (s.length === 0) return null;\n\nvar p = s.split(',');\nvar tag = p[0];\nvar out = [null, null, null, null, null, null, null, null];\n\nif (tag === 'LIVE' && p.length >= 11) {\n    out[0] = { payload: {\n        v: parseFloat(p[1]), i: parseFloat(p[2]), z: parseFloat(p[3]),\n        state: p[4], faults: parseInt(p[5], 10),\n        pos: parseInt(p[6], 10), vis: parseInt(p[7], 10),\n        expI: parseFloat(p[8]), expZ: parseFloat(p[9]),\n        zValid: parseInt(p[10], 10) === 1\n    } };\n}\nelse if (tag === 'WV' || tag === 'WI') {\n    // One whole mains cycle per line: WV,s1,s2,...,s20\n    var data = p.slice(1).map(Number).filter(function (n) { return !isNaN(n); });\n    if (data.length >= 2) out[tag === 'WV' ? 1 : 2] = { payload: data };\n}\nelse if (tag === 'FAULT' && p.length >= 7) {\n    // v7 FAULT layout:\n    // FAULT,section,distM,V,I,count,Z,condIdx,condName,distKm,ohmPerKm,modelM\n    // The conductor fields describe the section that CONTAINS the fault.\n    var f = {\n        section: parseInt(p[1], 10), dist: parseFloat(p[2]),\n        v: parseFloat(p[3]), i: parseFloat(p[4]),\n        count: parseInt(p[5], 10), z: parseFloat(p[6]),\n        cond: (p.length >= 12) ? p[8] : '',\n        distKm: (p.length >= 12) ? parseFloat(p[9]) : parseFloat(p[2]) / 1000\n    };\n    out[3] = { payload: f };\n\n    // The ESP32 repeats the FAULT line while faulted: log each fault once\n    if (context.get('lastFault') !== f.count) {\n        context.set('lastFault', f.count);\n        out[5] = { payload: 'FAULT #' + f.count + ' at ' + f.distKm.toFixed(3) +\n                   ' km (near S' + f.section + (f.cond ? ', ' + f.cond : '') +\n                   '), I=' + f.i.toFixed(3) + ' A, Z=' + f.z.toFixed(1) + ' ohm' };\n    }\n}\nelse if (tag === 'FAULT_CLEAR') {\n    out[3] = { payload: { clear: true } };\n}\nelse if (tag === 'COV' && p.length >= 4) {\n    out[4] = { payload: { pos: parseInt(p[1], 10), vis: parseInt(p[2], 10),\n                          text: p.slice(3).join(',') } };\n}\nelse if (tag === 'LINE' && p.length >= 6) {\n    // LINE,i1,i2,i3,i4,i5  = conductor setup the ESP32 is USING\n    out[6] = { payload: { conds: p.slice(1, 6).map(Number) } };\n}\nelse if (tag === 'SEC' && p.length >= 6) {\n    // SEC,n,idx,name,ohmPerKm,areaMm2  (one per section)\n    out[7] = { payload: {\n        sec: parseInt(p[1], 10), idx: parseInt(p[2], 10), name: p[3],\n        ohmPerKm: parseFloat(p[4]), areaMm2: parseFloat(p[5])\n    } };\n}\nelse if (tag === 'EVT') {\n    out[5] = { payload: p.slice(1).join(',') };\n}\nelse if (tag === 'WARN' || tag === 'ERR') {\n    out[5] = { payload: tag + ': ' + p.slice(1).join(',') };\n}\nelse if (tag === 'ACK') {\n    out[5] = { payload: 'ESP32 confirmed: ' + p.slice(1).join(' ') };\n}\n// CAT lines (conductor catalog) are ignored: the dropdown options are\n// fixed in the dashboard and must match the firmware catalog order.\n\nreturn out;\n",
+        "outputs": 8,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 280,
+        "y": 260,
+        "wires": [
+            [
+                "9b5491656a321ab0",
+                "0f1d2efb9e74997a",
+                "ae9d854380dd0cc4"
+            ],
+            [
+                "033d4c2e94209c8f"
+            ],
+            [
+                "eec003fef3731e83"
+            ],
+            [
+                "ae9d854380dd0cc4"
+            ],
+            [
+                "2873159715f45012"
+            ],
+            [
+                "99cf7249f84b23bc"
+            ],
+            [
+                "c0nd0000sync0001"
+            ],
+            [
+                "c0nd0000fmt00001"
+            ]
+        ]
+    },
+    {
+        "id": "0f1d2efb9e74997a",
+        "type": "function",
+        "z": "a96f03b406983529",
+        "name": "Status Banner Data",
+        "func": "// Big coloured status banner, driven by the ESP32 state\nvar d = msg.payload;\n\nvar text = {\n    BOOT:      'STARTING...',\n    WAIT_OFF:  'SWITCH SUPPLY OFF TO CALIBRATE',\n    CAL:       'CALIBRATING...',\n    WAIT_ON:   'SWITCH SUPPLY ON',\n    NORMAL:    'NORMAL OPERATION',\n    SUSPECT:   'CHECKING - POSSIBLE FAULT',\n    FAULT:     'FAULT DETECTED',\n    NO_SUPPLY: 'NO SUPPLY'\n}[d.state] || d.state;\n\nvar colour = '#616161';                                  // grey: setup / waiting\nif (d.state === 'NORMAL')         colour = '#2e7d32';    // green\nelse if (d.state === 'SUSPECT')   colour = '#f9a825';    // amber\nelse if (d.state === 'FAULT')     colour = '#c62828';    // red\nelse if (d.state === 'NO_SUPPLY') colour = '#ef6c00';    // orange\n\nreturn { payload: { state: d.state, text: text, colour: colour } };",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 520,
+        "y": 40,
+        "wires": [
+            [
+                "dab9928ba1913459"
+            ]
+        ]
+    },
+    {
+        "id": "dab9928ba1913459",
+        "type": "ui_template",
+        "z": "a96f03b406983529",
+        "group": "60ab9547bd8448df",
+        "name": "Status Banner",
+        "order": 1,
+        "width": "12",
+        "height": "2",
+        "format": "<div ng-style=\"{'background': msg.payload.colour, 'animation': (msg.payload.state == 'FAULT') ? 'lvfdblink 0.7s infinite' : 'none'}\"\n     style=\"padding:14px 8px;border-radius:8px;text-align:center;font-size:26px;font-weight:bold;color:#fff;letter-spacing:1px;\">\n  {{msg.payload.text || 'Waiting for ESP32...'}}\n</div>\n<style>@keyframes lvfdblink { 50% { opacity: 0.35; } }</style>",
+        "storeOutMessages": true,
+        "fwdInMessages": false,
+        "resendOnRefresh": true,
+        "templateScope": "local",
+        "className": "",
+        "x": 780,
+        "y": 40,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "9b5491656a321ab0",
+        "type": "function",
+        "z": "a96f03b406983529",
+        "name": "Split LIVE",
+        "func": "// Split one LIVE reading into separate messages.\n// Gauges and charts move from msg.payload, so each gets its own number.\nvar d = msg.payload;\n\n// While healthy the line carries only about 0.04 A - below what the ACS712\n// can resolve - so current and impedance are shown as CALCULATED values\n// (from the known resistances). During a fault the current is large and\n// the MEASURED values are shown automatically.\nvar measurable = d.zValid;\n\nvar iShown = measurable ? d.i : d.expI;\nvar zShown = measurable ? d.z : d.expZ;\nvar note   = measurable\n    ? 'Current and impedance shown: measured'\n    : 'Current and impedance shown: calculated from the known resistances (healthy current is below sensor resolution)';\n\n// No supply: nothing is flowing\nif (d.v < 5) {\n    iShown = 0;\n    zShown = 0;\n    note   = 'No supply';\n}\n\nreturn [\n    { payload: d.v,      topic: 'Voltage' },\n    { payload: iShown,   topic: 'Current' },\n    { payload: zShown },\n    { payload: d.faults },\n    { payload: d.expI.toFixed(4) + ' A' },\n    { payload: note }\n];",
+        "outputs": 6,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 500,
+        "y": 120,
+        "wires": [
+            [
+                "d0bc6f34c057691f",
+                "3f2030edc27acb37"
+            ],
+            [
+                "e870742478b133cd",
+                "160dba387fcebc5a"
+            ],
+            [
+                "9c88fa1191196545"
+            ],
+            [
+                "2923b7d6fce1d3c5"
+            ],
+            [
+                "53dc0aa7ad79ece6"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "d0bc6f34c057691f",
+        "type": "ui_gauge",
+        "z": "a96f03b406983529",
+        "name": "Voltage (V)",
+        "group": "60ab9547bd8448df",
+        "order": 2,
+        "width": "4",
+        "height": "4",
+        "gtype": "gage",
+        "title": "Voltage (V)",
+        "label": "V",
+        "format": "{{value | number:2}}",
+        "min": "0",
+        "max": "30",
+        "colors": [
+            "#00b500",
+            "#e6e600",
+            "#ca3838"
+        ],
+        "seg1": "",
+        "seg2": "",
+        "className": "",
+        "x": 780,
+        "y": 100,
+        "wires": []
+    },
+    {
+        "id": "e870742478b133cd",
+        "type": "ui_gauge",
+        "z": "a96f03b406983529",
+        "name": "Current (A)",
+        "group": "60ab9547bd8448df",
+        "order": 3,
+        "width": "4",
+        "height": "4",
+        "gtype": "gage",
+        "title": "Current (A)",
+        "label": "A",
+        "format": "{{value | number:2}}",
+        "min": "0",
+        "max": "1",
+        "colors": [
+            "#0099ff",
+            "#e6e600",
+            "#ca3838"
+        ],
+        "seg1": "",
+        "seg2": "",
+        "className": "",
+        "x": 780,
+        "y": 140,
+        "wires": []
+    },
+    {
+        "id": "9c88fa1191196545",
+        "type": "ui_gauge",
+        "z": "a96f03b406983529",
+        "name": "Impedance (ohm)",
+        "group": "60ab9547bd8448df",
+        "order": 4,
+        "width": "4",
+        "height": "4",
+        "gtype": "gage",
+        "title": "Impedance (ohm)",
+        "label": "ohm",
+        "format": "{{value | number:2}}",
+        "min": "0",
+        "max": "700",
+        "colors": [
+            "#00b500",
+            "#e6e600",
+            "#ca3838"
+        ],
+        "seg1": "",
+        "seg2": "",
+        "className": "",
+        "x": 790,
+        "y": 180,
+        "wires": []
+    },
+    {
+        "id": "53dc0aa7ad79ece6",
+        "type": "ui_text",
+        "z": "a96f03b406983529",
+        "group": "60ab9547bd8448df",
+        "order": 5,
+        "width": "6",
+        "height": "1",
+        "name": "Expected Current",
+        "label": "Expected healthy current",
+        "format": "{{msg.payload}}",
+        "layout": "row-spread",
+        "className": "",
+        "x": 800,
+        "y": 220,
+        "wires": []
+    },
+    {
+        "id": "2923b7d6fce1d3c5",
+        "type": "ui_text",
+        "z": "a96f03b406983529",
+        "group": "60ab9547bd8448df",
+        "order": 6,
+        "width": "6",
+        "height": "1",
+        "name": "Fault Count",
+        "label": "Faults detected",
+        "format": "{{msg.payload}}",
+        "layout": "row-spread",
+        "className": "",
+        "x": 790,
+        "y": 260,
+        "wires": []
+    },
+    {
+        "id": "3f2030edc27acb37",
+        "type": "ui_chart",
+        "z": "a96f03b406983529",
+        "name": "Voltage Trend",
+        "group": "11093b14297e0009",
+        "order": 1,
+        "width": "6",
+        "height": "5",
+        "label": "Voltage (V) - last 2 minutes",
+        "chartType": "line",
+        "legend": "false",
+        "xformat": "HH:mm:ss",
+        "interpolate": "linear",
+        "nodata": "waiting for data",
+        "dot": false,
+        "ymin": "0",
+        "ymax": "30",
+        "removeOlder": "2",
+        "removeOlderPoints": "300",
+        "removeOlderUnit": "60",
+        "cutout": 0,
+        "useOneColor": false,
+        "useUTC": false,
+        "colors": [
+            "#1f77b4",
+            "#aec7e8",
+            "#ff7f0e",
+            "#2ca02c",
+            "#98df8a",
+            "#d62728",
+            "#ff9896",
+            "#9467bd",
+            "#c5b0d5"
+        ],
+        "outputs": 1,
+        "className": "",
+        "x": 780,
+        "y": 360,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "160dba387fcebc5a",
+        "type": "ui_chart",
+        "z": "a96f03b406983529",
+        "name": "Current Trend",
+        "group": "11093b14297e0009",
+        "order": 2,
+        "width": "6",
+        "height": "5",
+        "label": "Current (A) - last 2 minutes",
+        "chartType": "line",
+        "legend": "false",
+        "xformat": "HH:mm:ss",
+        "interpolate": "linear",
+        "nodata": "waiting for data",
+        "dot": false,
+        "ymin": "0",
+        "ymax": "1",
+        "removeOlder": "2",
+        "removeOlderPoints": "300",
+        "removeOlderUnit": "60",
+        "cutout": 0,
+        "useOneColor": false,
+        "useUTC": false,
+        "colors": [
+            "#d62728",
+            "#1f77b4",
+            "#aec7e8",
+            "#ff7f0e",
+            "#2ca02c",
+            "#98df8a",
+            "#ff9896",
+            "#9467bd",
+            "#c5b0d5"
+        ],
+        "outputs": 1,
+        "className": "",
+        "x": 780,
+        "y": 400,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "033d4c2e94209c8f",
+        "type": "function",
+        "z": "a96f03b406983529",
+        "name": "Voltage Wave Points",
+        "func": "// Turn one mains cycle (array of samples) into SVG polyline points.\n// Auto-scales, but never below +/- FLOOR so noise is not blown up.\nvar d = msg.payload;\nvar FLOOR = 10;\nvar peak = FLOOR, i;\n\nfor (i = 0; i < d.length; i++) { if (Math.abs(d[i]) > peak) peak = Math.abs(d[i]); }\npeak = peak * 1.1;\n\nvar pts = [];\nfor (i = 0; i < d.length; i++) {\n    var x = i * 400 / (d.length - 1);\n    var y = 70 - (d[i] / peak) * 65;\n    pts.push(x.toFixed(1) + ',' + y.toFixed(1));\n}\n\nreturn { payload: { pts: pts.join(' '), rng: peak.toFixed(peak < 1 ? 2 : 1) } };",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 520,
+        "y": 460,
+        "wires": [
+            [
+                "6d7a78667e56fbf5"
+            ]
+        ]
+    },
+    {
+        "id": "6d7a78667e56fbf5",
+        "type": "ui_template",
+        "z": "a96f03b406983529",
+        "group": "11093b14297e0009",
+        "name": "Voltage Waveform",
+        "order": 3,
+        "width": "6",
+        "height": "5",
+        "format": "<div style=\"width:100%;\">\n  <div style=\"font-size:13px;opacity:.75;\">Voltage waveform (one cycle) <span ng-if=\"msg.payload.rng\">(range +/- {{msg.payload.rng}} V)</span></div>\n  <svg viewBox=\"0 0 400 140\" style=\"width:100%;height:auto;\">\n    <line x1=\"0\" y1=\"70\" x2=\"400\" y2=\"70\" stroke=\"#888\" stroke-width=\"0.6\" stroke-dasharray=\"3,3\"></line>\n    <polyline ng-attr-points=\"{{msg.payload.pts}}\" fill=\"none\" stroke=\"#1f77b4\" stroke-width=\"2\"></polyline>\n  </svg>\n</div>",
+        "storeOutMessages": true,
+        "fwdInMessages": false,
+        "resendOnRefresh": true,
+        "templateScope": "local",
+        "className": "",
+        "x": 780,
+        "y": 460,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "eec003fef3731e83",
+        "type": "function",
+        "z": "a96f03b406983529",
+        "name": "Current Wave Points",
+        "func": "// Turn one mains cycle (array of samples) into SVG polyline points.\n// Auto-scales, but never below +/- FLOOR so noise is not blown up.\nvar d = msg.payload;\nvar FLOOR = 0.2;\nvar peak = FLOOR, i;\n\nfor (i = 0; i < d.length; i++) { if (Math.abs(d[i]) > peak) peak = Math.abs(d[i]); }\npeak = peak * 1.1;\n\nvar pts = [];\nfor (i = 0; i < d.length; i++) {\n    var x = i * 400 / (d.length - 1);\n    var y = 70 - (d[i] / peak) * 65;\n    pts.push(x.toFixed(1) + ',' + y.toFixed(1));\n}\n\nreturn { payload: { pts: pts.join(' '), rng: peak.toFixed(peak < 1 ? 2 : 1) } };",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 520,
+        "y": 520,
+        "wires": [
+            [
+                "3e1bd5d5d4b97026"
+            ]
+        ]
+    },
+    {
+        "id": "3e1bd5d5d4b97026",
+        "type": "ui_template",
+        "z": "a96f03b406983529",
+        "group": "11093b14297e0009",
+        "name": "Current Waveform",
+        "order": 4,
+        "width": "6",
+        "height": "5",
+        "format": "<div style=\"width:100%;\">\n  <div style=\"font-size:13px;opacity:.75;\">Current waveform (one cycle) <span ng-if=\"msg.payload.rng\">(range +/- {{msg.payload.rng}} A)</span></div>\n  <svg viewBox=\"0 0 400 140\" style=\"width:100%;height:auto;\">\n    <line x1=\"0\" y1=\"70\" x2=\"400\" y2=\"70\" stroke=\"#888\" stroke-width=\"0.6\" stroke-dasharray=\"3,3\"></line>\n    <polyline ng-attr-points=\"{{msg.payload.pts}}\" fill=\"none\" stroke=\"#d62728\" stroke-width=\"2\"></polyline>\n  </svg>\n</div>",
+        "storeOutMessages": true,
+        "fwdInMessages": false,
+        "resendOnRefresh": true,
+        "templateScope": "local",
+        "className": "",
+        "x": 780,
+        "y": 520,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "ae9d854380dd0cc4",
+        "type": "function",
+        "z": "a96f03b406983529",
+        "name": "Fault Display",
+        "func": "// Shows fault details ONLY while a fault is active.\n// Inputs: FAULT data, FAULT_CLEAR, and every LIVE reading.\nvar d     = msg.payload;\nvar last  = context.get('last')  || null;\nvar state = context.get('state') || '';\n\nif (d.clear === true) {\n    last = null;                         // ESP32 says the fault is gone\n}\nelse if (d.section !== undefined) {\n    last = d;                            // new / updated fault data\n}\nelse if (d.state !== undefined) {        // a normal LIVE reading\n    state = d.state;\n    if (state === 'NORMAL') last = null; // healthy again -> clear (backup)\n}\ncontext.set('last', last);\ncontext.set('state', state);\n\nvar sec, dist, val;\nif (last) {\n    sec  = 'S' + last.section;\n    // v7: distance is conductor-based (km), walked section by section\n    dist = last.distKm.toFixed(3) + ' km';\n    val  = last.i.toFixed(3) + ' A   |   ' + last.z.toFixed(1) + ' ohm' +\n           (last.cond ? '   |   ' + last.cond : '');\n    if (state === 'NO_SUPPLY') sec += '  (last fault, supply lost)';\n} else {\n    sec  = 'No fault';\n    dist = '--';\n    val  = '--';\n}\n\n// Only update the screen when something changed\nvar key = sec + '|' + dist + '|' + val;\nif (context.get('key') === key) return null;\ncontext.set('key', key);\n\nreturn [ { payload: sec }, { payload: dist }, { payload: val } ];",
+        "outputs": 3,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 520,
+        "y": 600,
+        "wires": [
+            [
+                "82d5c846042b5b84"
+            ],
+            [
+                "868e0c817143e655"
+            ],
+            [
+                "1a73abe3b8e62def"
+            ]
+        ]
+    },
+    {
+        "id": "82d5c846042b5b84",
+        "type": "ui_text",
+        "z": "a96f03b406983529",
+        "group": "83e1928baee59823",
+        "order": 1,
+        "width": "6",
+        "height": "1",
+        "name": "Fault Section",
+        "label": "Fault section",
+        "format": "{{msg.payload}}",
+        "layout": "row-spread",
+        "className": "",
+        "x": 780,
+        "y": 580,
+        "wires": []
+    },
+    {
+        "id": "868e0c817143e655",
+        "type": "ui_text",
+        "z": "a96f03b406983529",
+        "group": "83e1928baee59823",
+        "order": 2,
+        "width": "6",
+        "height": "1",
+        "name": "Fault Distance",
+        "label": "Distance from source",
+        "format": "{{msg.payload}}",
+        "layout": "row-spread",
+        "className": "",
+        "x": 790,
+        "y": 620,
+        "wires": []
+    },
+    {
+        "id": "1a73abe3b8e62def",
+        "type": "ui_text",
+        "z": "a96f03b406983529",
+        "group": "83e1928baee59823",
+        "order": 3,
+        "width": "12",
+        "height": "1",
+        "name": "Fault Values",
+        "label": "Fault current | impedance | conductor",
+        "format": "{{msg.payload}}",
+        "layout": "row-spread",
+        "className": "",
+        "x": 790,
+        "y": 660,
+        "wires": []
+    },
+    {
+        "id": "2873159715f45012",
+        "type": "function",
+        "z": "a96f03b406983529",
+        "name": "Format Coverage",
+        "func": "var d = msg.payload;\nreturn { payload: 'Sensor after ' + d.pos + ' section(s)  |  ' + d.text };",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 520,
+        "y": 700,
+        "wires": [
+            [
+                "c3cf441286f2803e"
+            ]
+        ]
+    },
+    {
+        "id": "c3cf441286f2803e",
+        "type": "ui_text",
+        "z": "a96f03b406983529",
+        "group": "83e1928baee59823",
+        "order": 4,
+        "width": "12",
+        "height": "1",
+        "name": "Coverage",
+        "label": "Coverage",
+        "format": "{{msg.payload}}",
+        "layout": "row-spread",
+        "className": "",
+        "x": 780,
+        "y": 700,
+        "wires": []
+    },
+    {
+        "id": "99cf7249f84b23bc",
+        "type": "function",
+        "z": "a96f03b406983529",
+        "name": "Event Log",
+        "func": "// Keep the last 8 events, newest first\nvar log = context.get('log') || [];\nvar t = new Date().toLocaleTimeString();\n\nlog.unshift(t + '  ' + msg.payload);\nif (log.length > 8) log.length = 8;\n\ncontext.set('log', log);\nreturn { payload: log };",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 510,
+        "y": 760,
+        "wires": [
+            [
+                "235e7af1b63bdb94"
+            ]
+        ]
+    },
+    {
+        "id": "235e7af1b63bdb94",
+        "type": "ui_template",
+        "z": "a96f03b406983529",
+        "group": "83e1928baee59823",
+        "name": "Event Log Display",
+        "order": 5,
+        "width": "12",
+        "height": "5",
+        "format": "<div style=\"font-family:monospace;font-size:12px;line-height:1.6;\">\n  <div ng-repeat=\"e in msg.payload track by $index\">{{e}}</div>\n  <div ng-if=\"!msg.payload.length\" style=\"opacity:.6;\">No events yet</div>\n</div>",
+        "storeOutMessages": true,
+        "fwdInMessages": false,
+        "resendOnRefresh": true,
+        "templateScope": "local",
+        "className": "",
+        "x": 790,
+        "y": 760,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "2eca0b58735dc88e",
+        "type": "ui_numeric",
+        "z": "a96f03b406983529",
+        "name": "Sensor Position",
+        "label": "Sensor after section #",
+        "tooltip": "Number of sections BEFORE the sensor (0-4)",
+        "group": "147bf1676ee39fb7",
+        "order": 1,
+        "width": "6",
+        "height": "1",
+        "wrap": false,
+        "passthru": false,
+        "topic": "",
+        "topicType": "str",
+        "format": "{{value}}",
+        "min": 0,
+        "max": 4,
+        "step": 1,
+        "className": "",
+        "x": 130,
+        "y": 860,
+        "wires": [
+            [
+                "6d7a6ebdede20259"
+            ]
+        ]
+    },
+    {
+        "id": "6d7a6ebdede20259",
+        "type": "function",
+        "z": "a96f03b406983529",
+        "name": "Hold Pending",
+        "func": "// Position changes are only HELD here - nothing is sent to the ESP32\n// until the Send button is pressed.\nvar v = Number(msg.payload);\nflow.set('pendingPos', v);\n\nreturn { payload: 'Pending position: ' + v + '  (not sent - press Send)' };",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 330,
+        "y": 860,
+        "wires": [
+            [
+                "e4fe7fa9e4bd5079"
+            ]
+        ]
+    },
+    {
+        "id": "e4fe7fa9e4bd5079",
+        "type": "ui_text",
+        "z": "a96f03b406983529",
+        "group": "147bf1676ee39fb7",
+        "order": 3,
+        "width": "12",
+        "height": "1",
+        "name": "Position Status",
+        "label": "Position",
+        "format": "{{msg.payload}}",
+        "layout": "row-spread",
+        "className": "",
+        "x": 560,
+        "y": 860,
+        "wires": []
+    },
+    {
+        "id": "5e0a99515d3b52cb",
+        "type": "ui_button",
+        "z": "a96f03b406983529",
+        "name": "Send Position",
+        "group": "147bf1676ee39fb7",
+        "order": 2,
+        "width": "6",
+        "height": "1",
+        "passthru": false,
+        "label": "Send position",
+        "tooltip": "",
+        "color": "",
+        "bgcolor": "",
+        "className": "",
+        "icon": "",
+        "payload": "send",
+        "payloadType": "str",
+        "topic": "",
+        "topicType": "str",
+        "x": 130,
+        "y": 920,
+        "wires": [
+            [
+                "0d3e72cc9027c352"
+            ]
+        ]
+    },
+    {
+        "id": "0d3e72cc9027c352",
+        "type": "function",
+        "z": "a96f03b406983529",
+        "name": "Validate & Send",
+        "func": "// Runs when Send is pressed. Validates BEFORE anything goes to the hardware.\nvar MAX_POS = 4;     // = NUM_SECTIONS - 1 in the firmware (keep in sync)\n\nvar v = flow.get('pendingPos');\n\nif (v === undefined || v === null || isNaN(v)) {\n    return [null, { payload: 'Nothing to send - choose a position first' }];\n}\nif (!Number.isInteger(v) || v < 0 || v > MAX_POS) {\n    return [null, { payload: 'Invalid position ' + v + ' (allowed 0 to ' + MAX_POS + ') - not sent' }];\n}\n\nreturn [\n    { payload: 'POS,' + v + '\\n' },\n    { payload: 'Sent position ' + v + ' - waiting for ESP32 confirmation' }\n];",
+        "outputs": 2,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 920,
+        "wires": [
+            [
+                "6df7433ba357f278"
+            ],
+            [
+                "e4fe7fa9e4bd5079"
+            ]
+        ]
+    },
+    {
+        "id": "6df7433ba357f278",
+        "type": "serial out",
+        "z": "a96f03b406983529",
+        "name": "ESP32 Out",
+        "serial": "ser1",
+        "x": 560,
+        "y": 920,
+        "wires": []
+    },
+    {
+        "id": "ser1",
+        "type": "serial-port",
+        "name": "",
+        "serialport": "COM3",
+        "serialbaud": "115200",
+        "databits": "8",
+        "parity": "none",
+        "stopbits": "1",
+        "waitfor": "",
+        "newline": "\\n",
+        "bin": "false",
+        "out": "char",
+        "addchar": "",
+        "responsetimeout": "10000"
+    },
+    {
+        "id": "60ab9547bd8448df",
+        "type": "ui_group",
+        "name": "Status & Live Readings",
+        "tab": "8ff9caf6241ae982",
+        "order": 1,
+        "disp": true,
+        "width": "12",
+        "collapse": false
+    },
+    {
+        "id": "11093b14297e0009",
+        "type": "ui_group",
+        "name": "Graphs",
+        "tab": "8ff9caf6241ae982",
+        "order": 2,
+        "disp": true,
+        "width": "12",
+        "collapse": false
+    },
+    {
+        "id": "83e1928baee59823",
+        "type": "ui_group",
+        "name": "Fault Details & Events",
+        "tab": "8ff9caf6241ae982",
+        "order": 3,
+        "disp": true,
+        "width": "12",
+        "collapse": false
+    },
+    {
+        "id": "147bf1676ee39fb7",
+        "type": "ui_group",
+        "name": "Sensor Position",
+        "tab": "8ff9caf6241ae982",
+        "order": 4,
+        "disp": true,
+        "width": "12",
+        "collapse": false
+    },
+    {
+        "id": "8ff9caf6241ae982",
+        "type": "ui_tab",
+        "name": "LVFD Monitor",
+        "icon": "dashboard",
+        "order": 1
+    },
+    {
+        "id": "c0nd0000grp00001",
+        "type": "ui_group",
+        "name": "Line Conductors",
+        "tab": "8ff9caf6241ae982",
+        "order": 5,
+        "disp": true,
+        "width": "12",
+        "collapse": false
+    },
+    {
+        "id": "c0nd0000dd00000",
+        "type": "ui_dropdown",
+        "z": "a96f03b406983529",
+        "name": "Whole Line Conductor",
+        "label": "Whole line",
+        "tooltip": "",
+        "place": "Select conductor",
+        "group": "c0nd0000grp00001",
+        "order": 1,
+        "width": "6",
+        "height": "1",
+        "passthru": false,
+        "multiple": false,
+        "options": [
+            {
+                "label": "MOLE",
+                "value": 0,
+                "type": "num"
+            },
+            {
+                "label": "RABBIT",
+                "value": 1,
+                "type": "num"
+            },
+            {
+                "label": "DOG",
+                "value": 2,
+                "type": "num"
+            },
+            {
+                "label": "WOLF",
+                "value": 3,
+                "type": "num"
+            },
+            {
+                "label": "CANARY",
+                "value": 4,
+                "type": "num"
+            },
+            {
+                "label": "ZEBRA",
+                "value": 5,
+                "type": "num"
+            },
+            {
+                "label": "(mixed)",
+                "value": -1,
+                "type": "num"
+            }
+        ],
+        "payload": "",
+        "topic": "whole",
+        "topicType": "str",
+        "className": "",
+        "x": 140,
+        "y": 1000,
+        "wires": [
+            [
+                "c0nd0000hold0001"
+            ]
+        ]
+    },
+    {
+        "id": "c0nd0000dd00001",
+        "type": "ui_dropdown",
+        "z": "a96f03b406983529",
+        "name": "Section 1 Conductor",
+        "label": "Section 1",
+        "tooltip": "",
+        "place": "Select conductor",
+        "group": "c0nd0000grp00001",
+        "order": 2,
+        "width": "6",
+        "height": "1",
+        "passthru": false,
+        "multiple": false,
+        "options": [
+            {
+                "label": "MOLE",
+                "value": 0,
+                "type": "num"
+            },
+            {
+                "label": "RABBIT",
+                "value": 1,
+                "type": "num"
+            },
+            {
+                "label": "DOG",
+                "value": 2,
+                "type": "num"
+            },
+            {
+                "label": "WOLF",
+                "value": 3,
+                "type": "num"
+            },
+            {
+                "label": "CANARY",
+                "value": 4,
+                "type": "num"
+            },
+            {
+                "label": "ZEBRA",
+                "value": 5,
+                "type": "num"
+            }
+        ],
+        "payload": "",
+        "topic": "sec1",
+        "topicType": "str",
+        "className": "",
+        "x": 140,
+        "y": 1050,
+        "wires": [
+            [
+                "c0nd0000hold0001"
+            ]
+        ]
+    },
+    {
+        "id": "c0nd0000dd00002",
+        "type": "ui_dropdown",
+        "z": "a96f03b406983529",
+        "name": "Section 2 Conductor",
+        "label": "Section 2",
+        "tooltip": "",
+        "place": "Select conductor",
+        "group": "c0nd0000grp00001",
+        "order": 3,
+        "width": "6",
+        "height": "1",
+        "passthru": false,
+        "multiple": false,
+        "options": [
+            {
+                "label": "MOLE",
+                "value": 0,
+                "type": "num"
+            },
+            {
+                "label": "RABBIT",
+                "value": 1,
+                "type": "num"
+            },
+            {
+                "label": "DOG",
+                "value": 2,
+                "type": "num"
+            },
+            {
+                "label": "WOLF",
+                "value": 3,
+                "type": "num"
+            },
+            {
+                "label": "CANARY",
+                "value": 4,
+                "type": "num"
+            },
+            {
+                "label": "ZEBRA",
+                "value": 5,
+                "type": "num"
+            }
+        ],
+        "payload": "",
+        "topic": "sec2",
+        "topicType": "str",
+        "className": "",
+        "x": 140,
+        "y": 1100,
+        "wires": [
+            [
+                "c0nd0000hold0001"
+            ]
+        ]
+    },
+    {
+        "id": "c0nd0000dd00003",
+        "type": "ui_dropdown",
+        "z": "a96f03b406983529",
+        "name": "Section 3 Conductor",
+        "label": "Section 3",
+        "tooltip": "",
+        "place": "Select conductor",
+        "group": "c0nd0000grp00001",
+        "order": 4,
+        "width": "6",
+        "height": "1",
+        "passthru": false,
+        "multiple": false,
+        "options": [
+            {
+                "label": "MOLE",
+                "value": 0,
+                "type": "num"
+            },
+            {
+                "label": "RABBIT",
+                "value": 1,
+                "type": "num"
+            },
+            {
+                "label": "DOG",
+                "value": 2,
+                "type": "num"
+            },
+            {
+                "label": "WOLF",
+                "value": 3,
+                "type": "num"
+            },
+            {
+                "label": "CANARY",
+                "value": 4,
+                "type": "num"
+            },
+            {
+                "label": "ZEBRA",
+                "value": 5,
+                "type": "num"
+            }
+        ],
+        "payload": "",
+        "topic": "sec3",
+        "topicType": "str",
+        "className": "",
+        "x": 140,
+        "y": 1150,
+        "wires": [
+            [
+                "c0nd0000hold0001"
+            ]
+        ]
+    },
+    {
+        "id": "c0nd0000dd00004",
+        "type": "ui_dropdown",
+        "z": "a96f03b406983529",
+        "name": "Section 4 Conductor",
+        "label": "Section 4",
+        "tooltip": "",
+        "place": "Select conductor",
+        "group": "c0nd0000grp00001",
+        "order": 5,
+        "width": "6",
+        "height": "1",
+        "passthru": false,
+        "multiple": false,
+        "options": [
+            {
+                "label": "MOLE",
+                "value": 0,
+                "type": "num"
+            },
+            {
+                "label": "RABBIT",
+                "value": 1,
+                "type": "num"
+            },
+            {
+                "label": "DOG",
+                "value": 2,
+                "type": "num"
+            },
+            {
+                "label": "WOLF",
+                "value": 3,
+                "type": "num"
+            },
+            {
+                "label": "CANARY",
+                "value": 4,
+                "type": "num"
+            },
+            {
+                "label": "ZEBRA",
+                "value": 5,
+                "type": "num"
+            }
+        ],
+        "payload": "",
+        "topic": "sec4",
+        "topicType": "str",
+        "className": "",
+        "x": 140,
+        "y": 1200,
+        "wires": [
+            [
+                "c0nd0000hold0001"
+            ]
+        ]
+    },
+    {
+        "id": "c0nd0000dd00005",
+        "type": "ui_dropdown",
+        "z": "a96f03b406983529",
+        "name": "Section 5 Conductor",
+        "label": "Section 5",
+        "tooltip": "",
+        "place": "Select conductor",
+        "group": "c0nd0000grp00001",
+        "order": 6,
+        "width": "6",
+        "height": "1",
+        "passthru": false,
+        "multiple": false,
+        "options": [
+            {
+                "label": "MOLE",
+                "value": 0,
+                "type": "num"
+            },
+            {
+                "label": "RABBIT",
+                "value": 1,
+                "type": "num"
+            },
+            {
+                "label": "DOG",
+                "value": 2,
+                "type": "num"
+            },
+            {
+                "label": "WOLF",
+                "value": 3,
+                "type": "num"
+            },
+            {
+                "label": "CANARY",
+                "value": 4,
+                "type": "num"
+            },
+            {
+                "label": "ZEBRA",
+                "value": 5,
+                "type": "num"
+            }
+        ],
+        "payload": "",
+        "topic": "sec5",
+        "topicType": "str",
+        "className": "",
+        "x": 140,
+        "y": 1250,
+        "wires": [
+            [
+                "c0nd0000hold0001"
+            ]
+        ]
+    },
+    {
+        "id": "c0nd0000hold0001",
+        "type": "function",
+        "z": "a96f03b406983529",
+        "name": "Hold Conductors",
+        "outputs": 7,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 400,
+        "y": 1130,
+        "wires": [
+            [
+                "c0nd0000dd00001"
+            ],
+            [
+                "c0nd0000dd00002"
+            ],
+            [
+                "c0nd0000dd00003"
+            ],
+            [
+                "c0nd0000dd00004"
+            ],
+            [
+                "c0nd0000dd00005"
+            ],
+            [
+                "c0nd0000dd00000"
+            ],
+            [
+                "c0nd0000stat0001"
+            ]
+        ],
+        "func": "// Conductor selections are only HELD here - nothing is sent to the ESP32\n// until the Send conductors button is pressed.\n// Inputs : msg.topic = 'whole' | 'sec1'..'sec5', msg.payload = conductor index\n// Outputs: 0-4 = Section 1-5 dropdowns | 5 = Whole-line dropdown | 6 = status text\nvar NUM_SECTIONS   = 5;\nvar NUM_CONDUCTORS = 6;      // keep in sync with the firmware catalog\n\nvar pending = flow.get('pendingConductors') || [0, 0, 0, 0, 0];\nvar idx = Number(msg.payload);\n\n// Selecting \"(mixed)\" on the whole-line dropdown is only a display state\nif (msg.topic === 'whole' && idx === -1) return null;\n\n// Client-side validation: integer inside the catalog range\nif (!Number.isInteger(idx) || idx < 0 || idx >= NUM_CONDUCTORS) {\n    return [null, null, null, null, null, null,\n            { payload: 'Invalid conductor selection - ignored' }];\n}\n\nvar out = [null, null, null, null, null, null, null];\n\nif (msg.topic === 'whole') {\n    // Whole-line choice fills every section (still pending, not sent)\n    pending = [idx, idx, idx, idx, idx];\n    for (var k = 0; k < NUM_SECTIONS; k++) out[k] = { payload: idx };\n}\nelse {\n    var m = /^sec([1-5])$/.exec(msg.topic);\n    if (!m) return null;                       // unknown source, ignore\n    pending[Number(m[1]) - 1] = idx;           // single-section override\n\n    // Whole-line dropdown shows the common type, or \"(mixed)\"\n    var same = pending.every(function (v) { return v === pending[0]; });\n    out[5] = { payload: same ? pending[0] : -1 };\n}\n\nflow.set('pendingConductors', pending);\nout[6] = { payload: 'Pending: ' + pending.join(', ') + '  (not sent - press Send)' };\nreturn out;\n"
+    },
+    {
+        "id": "c0nd0000btn00001",
+        "type": "ui_button",
+        "z": "a96f03b406983529",
+        "name": "Send Conductors",
+        "group": "c0nd0000grp00001",
+        "order": 7,
+        "width": "6",
+        "height": "1",
+        "passthru": false,
+        "label": "Send conductors",
+        "tooltip": "",
+        "color": "",
+        "bgcolor": "",
+        "className": "",
+        "icon": "",
+        "payload": "send",
+        "payloadType": "str",
+        "topic": "",
+        "topicType": "str",
+        "x": 140,
+        "y": 1310,
+        "wires": [
+            [
+                "c0nd0000send0001"
+            ]
+        ]
+    },
+    {
+        "id": "c0nd0000send0001",
+        "type": "function",
+        "z": "a96f03b406983529",
+        "name": "Validate & Send Conductors",
+        "outputs": 2,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 400,
+        "y": 1310,
+        "wires": [
+            [
+                "6df7433ba357f278"
+            ],
+            [
+                "c0nd0000stat0001"
+            ]
+        ],
+        "func": "// Runs when Send conductors is pressed. Validates BEFORE anything goes\n// to the hardware, then sends ONE atomic command (ESP32 applies all 5 or none).\nvar NUM_SECTIONS   = 5;\nvar NUM_CONDUCTORS = 6;      // keep in sync with the firmware catalog\n\nvar pending = flow.get('pendingConductors');\n\nif (!Array.isArray(pending)) {\n    return [null, { payload: 'Nothing to send - choose a conductor first' }];\n}\n\nvar ok = pending.length === NUM_SECTIONS && pending.every(function (v) {\n    return Number.isInteger(v) && v >= 0 && v < NUM_CONDUCTORS;\n});\nif (!ok) {\n    return [null, { payload: 'Invalid selection (' + pending.join(', ') + ') - not sent' }];\n}\n\nreturn [\n    { payload: 'CONDALL,' + pending.join(',') + '\\n' },\n    { payload: 'Sent: ' + pending.join(', ') + ' - waiting for ESP32 confirmation' }\n];\n"
+    },
+    {
+        "id": "c0nd0000sync0001",
+        "type": "function",
+        "z": "a96f03b406983529",
+        "name": "Sync Conductors",
+        "outputs": 7,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 400,
+        "y": 1400,
+        "wires": [
+            [
+                "c0nd0000dd00001"
+            ],
+            [
+                "c0nd0000dd00002"
+            ],
+            [
+                "c0nd0000dd00003"
+            ],
+            [
+                "c0nd0000dd00004"
+            ],
+            [
+                "c0nd0000dd00005"
+            ],
+            [
+                "c0nd0000dd00000"
+            ],
+            [
+                "c0nd0000stat0001"
+            ]
+        ],
+        "func": "// The ESP32 reports the conductor setup it is actually USING (LINE message).\n// Show it on the dropdowns and make it the new pending value.\n// Outputs: 0-4 = Section 1-5 dropdowns | 5 = Whole-line dropdown | 6 = status text\nvar c = msg.payload.conds;\nvar same = c.every(function (v) { return v === c[0]; });\n\nflow.set('appliedConductors', c);\nflow.set('pendingConductors', c.slice());     // pending = applied\n\nreturn [\n    { payload: c[0] }, { payload: c[1] }, { payload: c[2] },\n    { payload: c[3] }, { payload: c[4] },\n    { payload: same ? c[0] : -1 },\n    { payload: 'Applied: ' + c.join(', ') }\n];\n"
+    },
+    {
+        "id": "c0nd0000fmt00001",
+        "type": "function",
+        "z": "a96f03b406983529",
+        "name": "Format Line Details",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 400,
+        "y": 1480,
+        "wires": [
+            [
+                "c0nd0000det00001"
+            ]
+        ],
+        "func": "// Collect the 5 SEC lines (one per section): conductor name + its ohm/km rating.\nvar t = context.get('table') || [];\nvar s = msg.payload;\nt[s.sec - 1] = 'S' + s.sec + ' ' + s.name + ' ' + s.ohmPerKm.toFixed(4) + ' ohm/km';\ncontext.set('table', t);\n\n// Only show once every section has reported at least once\nfor (var i = 0; i < 5; i++) { if (!t[i]) return null; }\nreturn { payload: t.join('  |  ') };\n"
+    },
+    {
+        "id": "c0nd0000stat0001",
+        "type": "ui_text",
+        "z": "a96f03b406983529",
+        "group": "c0nd0000grp00001",
+        "order": 8,
+        "width": "12",
+        "height": "1",
+        "name": "Conductor Status",
+        "label": "Conductors",
+        "format": "{{msg.payload}}",
+        "layout": "row-spread",
+        "className": "",
+        "x": 700,
+        "y": 1310,
+        "wires": []
+    },
+    {
+        "id": "c0nd0000det00001",
+        "type": "ui_text",
+        "z": "a96f03b406983529",
+        "group": "c0nd0000grp00001",
+        "order": 9,
+        "width": "12",
+        "height": "1",
+        "name": "Line Details",
+        "label": "Section conductors",
+        "format": "{{msg.payload}}",
+        "layout": "row-spread",
+        "className": "",
+        "x": 700,
+        "y": 1480,
+        "wires": []
+    },
+    {
+        "id": "c0nd0000inj00001",
+        "type": "inject",
+        "z": "a96f03b406983529",
+        "name": "Request setup (LIST)",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "3",
+        "topic": "",
+        "payload": "LIST\n",
+        "payloadType": "str",
+        "x": 150,
+        "y": 1570,
+        "wires": [
+            [
+                "6df7433ba357f278"
+            ]
+        ]
+    }
+]
